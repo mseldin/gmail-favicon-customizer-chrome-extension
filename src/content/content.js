@@ -1,79 +1,79 @@
 "use strict";
 
-var GFC = (function(){
+var GFC = (function () {
 
-    var _img_data_uri = null, //base image
-        _num_unread = null, //number of unread messages
-        _active = false, //is this tab active
-        _check_update_frequency = 1000, //how often (in ms) to set/verify favicon
-        _favicon = null,
-        MSG_RELAY = null;
+  var _img_data_uri = null, // base image
+      _num_unread = null, // number of unread messages
+      _check_update_frequency = 1000, // how often (ms) to update favicon
+      _favicon = null;
 
+  function _init() {
+    _wait_for_email();
+  }
 
-    function _init(){
-        MSG_RELAY = chrome_extension_message_relay( "gmail.favicon", "content", true );
-        MSG_RELAY.on('check_email_address', _check_email_address);
-        _insert_page_resources();
+  function _wait_for_email() {
+    var email = _get_user_email();
+    if (email) {
+      _load_settings(email.toLowerCase());
+    } else {
+      setTimeout(_wait_for_email, 1000);
     }
+  }
 
-    function _update_favicon_and_num_messages(){
-        var inbox_link = document.querySelector("div[role=navigation] a[title*=Inbox]")
-        if(inbox_link){
-            var num_unread = (inbox_link.text.indexOf('(') != -1) ? parseInt(inbox_link.text.replace(/[^0-9]/g, '')) : 0,
-                display_num = num_unread;
-            if(num_unread > 99) display_num = '99+'
-            if(_num_unread != num_unread) {
-                var anim = num_unread > _num_unread ? 'pop' : 'none';
-                _favicon.badge(display_num, {animation: anim});
-                _num_unread = num_unread;
-            }
+  function _get_user_email() {
+    var acct = document.querySelector('a[aria-label*="Google Account"]');
+    if (acct) {
+      var match = acct.getAttribute('aria-label').match(/([\w.+-]+@[\w.-]+)/);
+      if (match) return match[1];
+    }
+    var mailto = document.querySelector('a[href^="mailto:"]');
+    if (mailto) return mailto.getAttribute('href').replace('mailto:', '');
+    return null;
+  }
+
+  function _load_settings(email) {
+    chrome.storage.local.get('gmail_accounts', function (items) {
+      var accts = items.gmail_accounts || [];
+      for (var i = 0; i < accts.length; i++) {
+        if (accts[i].email === email) {
+          _img_data_uri = accts[i].favicon;
+          _setup_favicon_and_watcher();
+          break;
         }
+      }
+    });
+  }
+
+  function _update_favicon_and_num_messages() {
+    var match = document.title.match(/\((\d+)\)/),
+        num_unread = match ? parseInt(match[1], 10) : 0,
+        display_num = num_unread > 99 ? '99+' : num_unread;
+    if (_num_unread !== num_unread) {
+      var anim = num_unread > _num_unread ? 'pop' : 'none';
+      _favicon.badge(display_num, {animation: anim});
+      _num_unread = num_unread;
     }
+  }
 
-    function _setup_favicon_and_watcher(){
-        _favicon = new Favico({}, _img_data_uri);
+  function _setup_favicon_and_watcher() {
+    _favicon = new Favico();
+    var img = document.createElement('img');
+    img.addEventListener('load', function () {
+      _favicon.image(img);
+      setInterval(_update_favicon_and_num_messages, _check_update_frequency);
+      _update_favicon_and_num_messages();
+    });
+    img.src = _img_data_uri;
+  }
 
-        setInterval( _update_favicon_and_num_messages, _check_update_frequency );
-        _update_favicon_and_num_messages();
-    }
-
-    function _check_email_address( data ){
-        chrome.storage.local.get('gmail_accounts',function(items){
-            var accts = 'gmail_accounts' in items ? items.gmail_accounts :[];
-            for( var i=0; i<accts.length; i++) {
-                if(accts[i].email==data.email){
-                    _active = true;
-                    _img_data_uri = accts[i].favicon;
-                    break;
-                }
-            }
-            if(_active) _setup_favicon_and_watcher();
-        });
-    }
-
-    function _insert_page_resources(){
-        var elems = [
-            chrome.extension.getURL( '/src/shared/message-relay/message_relay.js' ),
-            chrome.extension.getURL( '/src/page/page.js' )
-        ]
-        for(var i=0; i<elems.length; i++) {
-            var s = document.createElement('script');
-            s.src = elems[i];
-            document.head.appendChild(s);
-        }
-    }
-
-    return{
-        init:_init
-    };
+  return {
+    init: _init
+  };
 })();
 
-function wait_for_resources(){
-    var needed = [
-        typeof(window.chrome_extension_message_relay),
-        typeof(window.Favico)
-    ];
-    if(needed.indexOf('undefined')!==-1) return setTimeout(wait_for_resources,300);
-    GFC.init();
+function wait_for_resources() {
+  if (typeof window.Favico === 'undefined') return setTimeout(wait_for_resources, 300);
+  GFC.init();
 }
 wait_for_resources();
+
