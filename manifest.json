@@ -30,6 +30,7 @@
       "matches": [
         "https://mail.google.com/*"
       ]
+
     }
   ],
   "permissions": [
