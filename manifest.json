@@ -1,7 +1,7 @@
 {
   "name": "Gmail Favicon Customizer",
-  "version": "1.0.0",
-  "manifest_version": 2,
+  "version": "2.0.0",
+  "manifest_version": 3,
   "author": "Evan Carothers",
   "description": "Customize your gmail favicon",
   "homepage_url": "https://github.com/ecaroth/gmail-favicon-customizer-chrome-extension",
@@ -11,7 +11,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/mail/*"],
+      "matches": [
+        "https://mail.google.com/mail/*"
+      ],
       "js": [
         "src/shared/message-relay/message_relay.js",
         "src/shared/favico/favico.js",
@@ -20,16 +22,24 @@
     }
   ],
   "web_accessible_resources": [
-    "/src/*"
+    {
+      "resources": [
+        "src/shared/message-relay/message_relay.js",
+        "src/page/page.js"
+      ],
+      "matches": [
+        "https://mail.google.com/*"
+      ]
+    }
   ],
   "permissions": [
     "storage",
-    "unlimitedStorage",
-    "https://mail.google.com/mail/"
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/mail/*"
   ],
   "options_ui": {
-    "page": "src/options/options.html",
-    "chrome_style": true
-  },
-  "content_security_policy": "script-src 'self'; object-src 'self'"
+    "page": "src/options/options.html"
+  }
 }

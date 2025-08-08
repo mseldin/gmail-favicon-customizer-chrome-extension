@@ -17,16 +17,13 @@ var GFC = (function(){
     }
 
     function _update_favicon_and_num_messages(){
-        var inbox_link = document.querySelector("div[role=navigation] a[title*=Inbox]")
-        if(inbox_link){
-            var num_unread = (inbox_link.text.indexOf('(') != -1) ? parseInt(inbox_link.text.replace(/[^0-9]/g, '')) : 0,
-                display_num = num_unread;
-            if(num_unread > 99) display_num = '99+'
-            if(_num_unread != num_unread) {
-                var anim = num_unread > _num_unread ? 'pop' : 'none';
-                _favicon.badge(display_num, {animation: anim});
-                _num_unread = num_unread;
-            }
+        var match = document.title.match(/\((\d+)\)/),
+            num_unread = match ? parseInt(match[1],10) : 0,
+            display_num = num_unread > 99 ? '99+' : num_unread;
+        if(_num_unread !== num_unread){
+            var anim = num_unread > _num_unread ? 'pop' : 'none';
+            _favicon.badge(display_num, {animation: anim});
+            _num_unread = num_unread;
         }
     }
 
@@ -53,8 +50,8 @@ var GFC = (function(){
 
     function _insert_page_resources(){
         var elems = [
-            chrome.extension.getURL( '/src/shared/message-relay/message_relay.js' ),
-            chrome.extension.getURL( '/src/page/page.js' )
+            chrome.runtime.getURL( '/src/shared/message-relay/message_relay.js' ),
+            chrome.runtime.getURL( '/src/page/page.js' )
         ]
         for(var i=0; i<elems.length; i++) {
             var s = document.createElement('script');
