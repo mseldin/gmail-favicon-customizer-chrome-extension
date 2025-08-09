@@ -17,7 +17,7 @@ var GFC = (function(){
     }
 
     function _update_favicon_and_num_messages(){
-        var match = document.title.match(/\((\d+)\)/),
+    	var match = document.title.match(/\((\d+)\)/),
             num_unread = match ? parseInt(match[1],10) : 0,
             display_num = num_unread > 99 ? '99+' : num_unread;
         if(_num_unread !== num_unread){
@@ -25,6 +25,15 @@ var GFC = (function(){
             _favicon.badge(display_num, {animation: anim});
             _num_unread = num_unread;
         }
+        var link = document.querySelector("link[rel~='icon']");
+		if (!link) {
+			link = document.createElement('link');
+			link.rel = 'icon';
+			document.head.appendChild(link);
+		}
+		link.href = _img_data_uri;
+		//console.log("*updating favicon, uri is "+link.href)
+        
     }
 
     function _setup_favicon_and_watcher(){
@@ -35,12 +44,15 @@ var GFC = (function(){
     }
 
     function _check_email_address( data ){
+    	console.log("checking email address: "+data.email)
         chrome.storage.local.get('gmail_accounts',function(items){
             var accts = 'gmail_accounts' in items ? items.gmail_accounts :[];
             for( var i=0; i<accts.length; i++) {
+            	accts[i].favicon = accts[i].favicon.replace(/[\n\r\t]/gm, "");
                 if(accts[i].email==data.email){
                     _active = true;
                     _img_data_uri = accts[i].favicon;
+                    console.log("	found uri: "+_img_data_uri)
                     break;
                 }
             }
@@ -72,5 +84,6 @@ function wait_for_resources(){
     ];
     if(needed.indexOf('undefined')!==-1) return setTimeout(wait_for_resources,300);
     GFC.init();
+    console.log("*GFC Initted.")
 }
 wait_for_resources();

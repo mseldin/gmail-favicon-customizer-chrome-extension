@@ -305,6 +305,7 @@
 				animation: opts
 			} : opts) || {};
 			_readyCb = function () {
+				console.log("-- badge "+number);
 				try {
 					if (typeof (number) === 'number' ? (number > 0) : (number !== '')) {
 						var q = {
@@ -510,6 +511,11 @@
 					if ((/(^|\s)icon(\s|$)/i).test(links[i].getAttribute('rel'))) {
 						icons.push(links[i]);
 					}
+				}
+				if (icons.length<1) {
+					link = document.createElement('link');
+					link.rel = 'icon';
+					document.head.appendChild(link);
 				}
 				return icons;
 			};

@@ -1,901 +1,275 @@
-// IMPORTANT NOTE!
-// DO NOT use this version of the script in production, this is the dev/build version that exposes internal
-// functions for testing. Use the modified, minified version in /dist/message_relay.prod.js
+"use strict";
 
-// NOTE - lines that include /*REM*/ are stripped when building production version of this script
+function chrome_extension_message_relay( namespace, relay_level, debug ){
 
-/* MODULE_EXPORTS */ ((globals) => {
+    var _debug = debug || false,
 
-    const relay = function( namespace, relayLevel, debug, targetDomain ){
-        if(!targetDomain) targetDomain = "*";
+        _levels = {                             //available levels msg relay can be used at
+            extension:  'extension',
+            content:    'content',
+            page:       'page',
+            iframe:     'iframe',
+            iframe_shim:'iframe_shim'
+        },
+        _level_order = {                        //ordering of levels (indicitive of how messages can bubble up/down)
+            extension: 4,
+            content: 3,
+            page: 2,
+            iframe_shim: 1,
+            iframe: 0
+        },
 
-        const _debug = debug || false,
+        level = relay_level,                    //relay level (one of 'content','page','iframe','extension') - the level that THIS relay is listening at
+        received_messages = [],                 //digest of all received messages (in debug mode only)
+        valid_windows = [],                     //list of valid windows that can access message relay (parent windows, iframes in pages, etc)
+        msg_namespace = namespace,              //the namespace for your msg relay - used to capture and identify relay msgs from other postMsg traffic "docalytics.message";   //
+        last_sender_info = null,                //info about the last message sender
+        last_msg_type = null,                   //the last received message type
+        listeners = {};                         //bound listeners for the relay (at this level)
 
-            LEVELS = Object.freeze({             // available levels msg relay can be used at
-                service_worker:  'service_worker',  // relay running in chrome extension
-                content:    'content',              // relay running in content script
-                page:       'page',                 // relay running on web page
-                iframe:     'iframe',               // relay running in iframe
-                iframe_shim:'iframe_shim',          // relay running in an iframe shim (see readme)
-                test:       'test'                  // relay for unit testing
-            }),
-            LEVEL_ORDER = Object.freeze({           // ordering of levels (indicitive of how messages can bubble up/down)
-                service_worker: 4,
-                content:        3,
-                page:           2,
-                iframe_shim:    1,
-                iframe:         0,
-                test:           -1
-            }),
-            level = relayLevel;                          // relay level (one of 'content','page','iframe','extension') - the level that THIS relay is listening at
-
-        let _receivedMessages = {},                      // digest of all received messages by msgId, which is cleaned out every 2 mins to keep memory usage down
-            _receivedMsgCleanTmo = null,                 // tmo for setTimeout call used to clean _receivedMessages digest every 2 minutes
-            _receivedMsgCleanIntervalSecs = 2*60,        // 2 mins between digest cleaning intervals
-            _relayNamespace = namespace,                 // the namespace for your msg relay - used to capture and identify relay msgs from other postMsg traffic "docalytics.message";   //
-            _lastSender = null,                          // info about the last message sender
-            _lastMsg = null,                             // the last received message (type, component, namespace))
-            _listeners = {},                             // bound listeners for the relay (at this level)
-            // _contentScriptsReady = {},                // used by extension level only, to track what content scripts in tabIds are ready
-            _contentScriptConnectPort = null,            // used by content script level only, to hold variable for chrome.rumtime port to extension
-            _onComponentInitializedFns = [],             // FNs to call when a component is initialized. Format is (componentName, iframeRef, windowRef)
-            _componentEnvData = {},                      // hash of env data to pass to iframed components when they initialize (only used in content)
-            _componentLocalOverride = false;             // For testing/debug, short-circuit actual component inti lifecycle
-
-        const COMPONENT_STATE_NS = '_CSTATE';
-        const COMPONENT_STATE = Object.freeze({
-            ready: 'ready',
-            initEnv: 'initEnv',
-            initialized: 'initalized'
-        });
-        const _components = {};
-        const MSG_ID_ASSIGNMENT_DELIM = "@@@";
-        const COMPONENT_NAME_ALL_PREFIX = "***";
-
-        // =============== START OF TEST-ONLY VARIABLE DEFS ====================
-
-        let testResponse = null;  //Response function used to validate tests in a few circumstances                     /*REM*/
-
-        // =============== END OF TEST-ONLY VARIABLE DEFS ====================
-
-        // This function allows you to bind any msg type as a listener, and will ping the callback when the message comes to this level (exposed as <instance>.on)
-        // you can also namespace msg types with msgType.namespace, or specify no namespace
-        // limitFrom_level allows you to limit the incoming messages that listener will fire on for security purposes
-        function _bind( msgTypes, cb, limitFromLevels= null, isOnce=false, componentFilter = null){
-            if( typeof msgTypes === 'string' ) msgTypes = [msgTypes];
-            if(limitFromLevels && !Array.isArray(limitFromLevels)) limitFromLevels = [limitFromLevels];
-
-            const bound = [];
-            msgTypes.forEach((msgType) =>{
-                let mtypeInfo = _getMtypeInfo(msgType);
-                if(!(mtypeInfo.type in _listeners)) _listeners[mtypeInfo.type] = [];
-                const bindId = _guid();
-                _listeners[mtypeInfo.type].push({
-                    fn: cb,
-                    ns: mtypeInfo.namespace,
-                    limitFromLevels,
-                    componentFilter,
-                    isOnce,
-                    bindId
-                });
-                bound.push({
-                    msgType: mtypeInfo.type,
-                    bindId
-                });
-            });
-            return bound;
+    //this function allows you to bind any msg type as a listener, and will ping the callback when the message comes to this level (exposed as <instance>.on)
+    //you can also namespace msg types with msg_type.namespace, or specify no namespace
+    function _bind( msg_types, cb ){
+        if(typeof(msg_types)=='string') msg_types = [msg_types];
+        for(var i=0; i<msg_types.length; i++){
+            var parts = msg_types[i].split('.'),
+                _mtype = parts[0],
+                _namespace = parts[1];
+            if(!(_mtype in listeners)) listeners[_mtype] = [];
+            listeners[_mtype].push({ 'fn': cb, 'ns': _namespace});
         }
-
-        // unbind any number of bind referenced listeners (in format [{msgType, bindId}, ...]
-        function _offBound(boundListeners){
-            if(!Array.isArray(boundListeners)) boundListeners = [boundListeners];
-            boundListeners.filter(b => !!b).forEach(bound => {
-                if(!(bound.msgType in _listeners)) return;
-                const index = _listeners[bound.msgType].find(l => l.bindId === bound.bindId);
-                if(index !== -1) _listeners[bound.msgType].splice(index, 1);
-            });
-        }
-
-        // this function allows you to unbind any msg type as a listener (with a sepcified namespace or ALL events of this type(s) if no namespace is supplied)
-        function _unbind(msgTypes, componentId=null){
-            // TODO handle componentId ? (might not be needed)
-            if(componentId){}
-
-            if(!msgTypes) return;
-            if( typeof msgTypes === 'string' ) msgTypes = [msgTypes];
-
-            msgTypes.forEach((msgType) => {
-                let mtypeInfo = _getMtypeInfo(msgType);
-
-                if(mtypeInfo.type in _listeners){
-                    if(!mtypeInfo.namespace){
-                        //unbind ALL listeners on this message type
-                        delete _listeners[mtypeInfo.type];
-                    }else{
-                        //find only messages bound on this namespace/type
-                        _unbindNamspaceListenersForMessageType( mtypeInfo.type, mtypeInfo.namespace );
-                    }
-                }
-            });
-        }
-
-        function _buildComponentStateMsgType(type, componentId){
-            return _buildMsgTypeFromParts(type, COMPONENT_STATE_NS, componentId);
-        }
-
-        function _buildMsgTypeFromParts(type, namespace=null, componentId=null){
-            let msgType = type;
-            if(namespace) msgType += '.' + namespace;
-            if(componentId){
-                msgType += `[${componentId}]`;
-            }
-            return msgType;
-        }
-
-        //this function parses message type into component parts (type && namespace)
-        function _getMtypeInfo(msgType){
-            // possible formats:
-            // 'foo'            - standard message
-            // 'foo.bar'        - namespaced message
-            // 'foo.bar[@baz]   - namespace message with component (also non namespaced w/ component)
-
-            // NOTE this also splits message ID off
-            msgType = msgType.split(MSG_ID_ASSIGNMENT_DELIM)[0];
-
-            let type = null, namespace = null, component = null;
-
-            const re = /^([\w:_-]+)\.?([\w:_-]+)?(\[(.+)])?$/;
-            const matches = msgType.match(re);
-            if(matches[2]){
-                namespace = matches[2];
-                type = matches[1];
-            }else{
-                type = matches[1];
-            }
-            if(matches[4]) component = matches[4];
-
-            return {type, namespace, component};
-        }
-
-        //utility function to unbind all namespaced listeners for supplied message type
-        function _unbindNamspaceListenersForMessageType( msgType, namespace ){
-            if(!(msgType in _listeners)) return;
-            _listeners[msgType] = _listeners[msgType].filter(l => l.ns !== namespace);
-            if(!_listeners[msgType].length) delete _listeners[msgType];
-        }
-
-        //this function unbinds ALL listeners, or all listeners for a specific namespace
-        function _unbindAll( namespace ){
-            if( !namespace){
-                _listeners = {};
-            }else{
-                for(let msgType in _listeners){
-                    _unbindNamspaceListenersForMessageType(msgType, namespace);
-                }
-            }
-        }
-
-        function _buildMsgId(dest, msgType){
-            return `${dest}:${msgType}${MSG_ID_ASSIGNMENT_DELIM}${_guid()}`;
-        }
-
-        //get the base msg object used for relaying
-        function _getMsg( type, dest, sourceLevel, up, data ){
-            // try stringify and parse message data to make sure nothing invalid is included
-            data = _validateData(data);
-
-            // type = string, message type (specified when calling send_up or send_down)
-            // dest = destination level (one of LEVELS) - NOTE: can specific a specific tab.id to use only by specifying a @tab.id
-            // sourceLevel = origin source level where message was sent from
-            // up = boolean, is this message going upwards (else going down)
-            // data = javascript variable to pass with message
-            let msgId = ('msgId' in data) ? data.msgId : _buildMsgId(dest, type);
-            data.msgId = msgId;
-            let msgObj = {
-                msgType:            type,
-                msgFrom:            level,
-                sourceLevel:        sourceLevel,
-                msgDestination:     dest,
-                msgUp:              up,
-                relayNamespace:     _relayNamespace,
-                msgData:            data,
-                msgId:              msgId,
-                msgTabId:           null
-            };
-            const destObj = _parseDestination(dest);
-            if( destObj.tabId ){
-                msgObj.msgDestination = destObj.level;
-                msgObj.msgTabId = destObj.tabId;
-            }
-            return msgObj;
-        }
-
-        // send a message reponse to the last component message received
-        function _componentRespond(msgType, data){
-            const last = _lastMsg;
-            if(last.component) {
-                _sendMsg(msgType, LEVELS.iframe, data, last.component);
-            }
-        }
-
-        //send a message to the specified level(s) - NOTE destinations can be a string or array of destination strings
-        function _sendMsg( msgType, destinations, data, componentId=null ){
-            data = _validateData(data);
-
-            if( typeof destinations === 'string' ) destinations = [destinations];
-
-            if(componentId) {
-                const mtypeParts = _getMtypeInfo(msgType);
-                msgType = _buildMsgTypeFromParts(mtypeParts.type, mtypeParts.namespace, componentId);
-            }
-
-            destinations.forEach((dest) => {
-                if( !_isValidDestination(dest) ){
-                    return _log(`NOTICE - invalid level specified as destination (${dest})`);
-                }
-
-                const destLevel = _parseDestination(dest).level;
-
-                if (LEVEL_ORDER[destLevel] < LEVEL_ORDER[level]) {
-                    _sendDown(msgType, dest, data);
-                } else {
-                    _sendUp(msgType, dest, data);
-                }
-
-            });
-        }
-
-        //send a message DOWN the listening stack (exposed as <instance>.send_down)
-        function _sendDown( msgType, destination, data= {}){
-            const msg = _getMsg( msgType, destination, level, false, data );
-            _log( `Send msg DOWN from ${level} to ${destination} : ${msgType} - ${JSON.stringify(data)}`);
-            _relay(msg);
-        }
-
-        //send a message UP the listening stack (exposed as <instance>.send_up)
-        function _sendUp( msgType, destination, data ){
-            const msg = _getMsg( msgType, destination, level, true, data );
-            _log( `Send msg UP from ${level} to ${destination} : ${msgType} - ${JSON.stringify(data)}`);
-            _relay(msg);
-        }
-
-        //fn to relay a message from thisLevel either up/down (using appropriate method baesd on data.msgDestination)
-        function _relayFromToLevel(thisLevel, msg){
-
-            /*
-            TODO -- fix for service worker
-            if( thisLevel === LEVELS.service_worker){
-                // TODO
-            }else
-            */
-            if( (thisLevel === LEVELS.content && msg.msgDestination === LEVELS.service_worker) || thisLevel === LEVELS.service_worker ){
-                //going UP form content script to extension. use connected runtime port
-
-                if(level === LEVELS.test){                                                                              /*REM*/
-                    if(typeof testResponse === 'function') testResponse("content_up", msg);                             /*REM*/
-                }else{                                                                                                  /*REM*/
-                    // verify that message is coming from script within your extension
-                    // NOTE this will prevent external connectible messages from outside your extension,
-                    // but we want that for security reasons
-
-                    if(_contentScriptConnectPort) {
-                        _contentScriptConnectPort.postMessage(msg);
-                    }
-                }                                                                                                       /*REM*/
-            }else{
-                //no interaction with extension background, broadcast UP w/ postmessage so content/page can receive
-                if( thisLevel === LEVELS.iframe || (msg.msgDestination !== LEVELS.iframe && thisLevel === LEVELS.iframe_shim)) {
-                    if(level === LEVELS.test){                                                                          /*REM*/
-                        if(typeof testResponse === 'function') testResponse("iframe_up", msg);                          /*REM*/
-                    }else{                                                                                              /*REM*/
-                        globals.parent.postMessage(msg, targetDomain);
-                    }                                                                                                   /*REM*/
-                }else if( (thisLevel === LEVELS.page || thisLevel === LEVELS.content) && [LEVELS.iframe, LEVELS.iframe_shim].includes(msg.msgDestination)){
-                    //going DOWN from content/page to iframe, so postMessage to iframe(s) directly
-
-                    if(level === LEVELS.test){                                                                          /*REM*/
-                        const testResp = msg.msgDestination === LEVELS.iframe ? 'iframe_down' : 'iframe_shim_down';     /*REM*/
-                        if(typeof testResponse === 'function') testResponse(testResp, msg);                             /*REM*/
-                    }else{                                                                                              /*REM*/
-                        const iframes = document.getElementsByTagName('iframe');
-                        const {component} = _getMtypeInfo(msg.msgType);
-                        for(let i=0; i<iframes.length; i++){
-
-                            if(component && !component.startsWith(COMPONENT_NAME_ALL_PREFIX)){
-                                // if this message is targetted at a specific component only send to that iframe
-                                // NOTE this might be overkill as it'll get filtered out in the iframe relays anyway,
-                                // it just keeps down chatter
-                                if(iframes[i].getAttribute(_componentIdDataAttr(component)) !== COMPONENT_STATE.ready){
-                                    continue;
-                                }
-                            }
-
-                            if(LEVELS.content === level){
-                                const validOrigins = [
-                                    "chrome-extension://" + chrome.runtime.id,
-                                    window.location.origin
-                                ];
-                                let frameUrl;
-                                try {
-                                    frameUrl = new URL(iframes[i].src);
-                                }catch(e){
-                                    continue;
-                                }
-                                if (!validOrigins.includes(frameUrl.origin)){
-                                    // If sending from content or page, only send the message to iframes in our extension
-                                    continue;
-                                }
-                            }
-
-                            iframes[i].contentWindow.postMessage(msg, '*');
-                        }
-                    }                                                                                                   /*REM*/
-                }else{
-                    // communication between content and page directly (UP or DOWN) or from content to iframe_shim or iframe_shim to iframe
-                    if(level === LEVELS.test){                                                                          /*REM*/
-                        if(typeof testResponse === 'function'){                                                         /*REM*/
-                            testResponse("page_content_"+(msg.msgUp ? 'up' : 'down'), msg);                             /*REM*/
-                        }                                                                                               /*REM*/
-                    }else{                                                                                              /*REM*/
-                        // determine target and set targetOrigin appropriately
-                        if(msg.msgDestination === LEVELS.iframe && thisLevel === LEVELS.iframe_shim){
-                            // sending DOWN to sub-frames from iframe shim
-                            // NOTE this makes the assumption that we want to post to all sub-frames within the shim
-                            // if we want to restrict which frames it is passed to, this will need to change
-                            for (let i=0; i < globals.frames.length; i++) {
-                                globals.frames[i].postMessage(msg, "*");
-                            }
-                        }else {
-                            globals.postMessage(msg, "*");
-                        }
-                    }                                                                                                   /*REM*/
-                }
-            }
-        }
-
-        //This function is used by both send_up and send_down to relay a message the proper direction
-        function _relay( msgObj){
-            _relayFromToLevel( level, msgObj );
-        }
-
-        //This function is called for every incoming message to this level and determines if the messsage is intended for this level
-        //(and calls needed listeners) or continues relaying it upwards/downwards
-        function _incomingMessage( msg, sender ){
-            //searialize/unserialize msg object so we don't end up with closure memory leaks, then assign
-            const {msgData, msgFrom, sourceLevel, msgUp, msgDestination, msgType, msgId} = msg;
-
-            //set last sender & last message type
-            if(sender) _lastSender = sender;
-            _lastMsg = _getMtypeInfo(msgType);
-
-            const msgReceptionId = `${msgId}:${msgDestination}`;
-
-            if(msgFrom === level || (msgReceptionId in _receivedMessages)){
-                // Message already received - need this because page scripts and content scripts listen at same
-                // postMessage level and we don't want to relay it twice if it's a pass-through
-                return false;
-            }
-
-            if( msgDestination === level ){
-                // Message intended for this level, call any bound listeners
-                _log( `Msg (${msgType}) received from ${msgFrom} to ${msgDestination} - ${JSON.stringify(msgData)}` );
-                _receivedMessages[msgReceptionId] = 0;
-
-                if(level === LEVELS.test && typeof testResponse === 'function'){                                        /*REM*/
-                    testResponse("call_listener", msg);                                                                 /*REM*/
-                }else{                                                                                                  /*REM*/
-                    _callBoundListeners( msgType, msgData, sourceLevel );
-                }                                                                                                       /*REM*/
-            }else{
-                // Message still bubbling up/down, just relay if needed
-                msg.msgFrom = level;
-
-                if(level === LEVELS.test && typeof testResponse === 'function'){                                        /*REM*/
-                    testResponse("bubble", msg);                                                                        /*REM*/
-                }else{                                                                                                  /*REM*/
-                    if(msgUp && LEVEL_ORDER[level] > LEVEL_ORDER[msgFrom]){
-                        _relay( msg );
-                        _log( `Msg (${msgType}) relaying UP from ${msgFrom} to ${msgDestination} - ${JSON.stringify(msgData)}` );
-                    }else if(!msgUp && LEVEL_ORDER[level] < LEVEL_ORDER[msgFrom]){
-                        _relay( msg );
-                        _log( `Msg (${msgType}) relaying DOWN ${msgFrom} to ${msgDestination} - ${JSON.stringify(msgData)}` );
-                    }
-                }                                                                                                       /*REM*/
-            }
-        }
-
-        // convert a component ID like 'Name{12313123123}' to a data attribute friendly value
-        function _componentIdDataAttr(component){
-            return "relay-component-" + component.replace(/[\W]/g,'-').replace(/-+$/,'');
-        }
-
-        // parse a component's name from it's ID
-        function _componentNameFromId(id){
-            // format is 'componentName{GUID-ID-..}'
-            const matches = id.match(/^(.+){[a-z0-9-]+}$/);
-            return matches ? matches[1] : null;
-        }
-
-        //call all bound listeners for this message type at this level
-        function _callBoundListeners( msgType, msgData, sourceLevel ){
-            // handle special component-case messages
-
-            // strip msgId from data
-            delete msgData.msgId;
-            delete msgData.msg_id; // for LEGACY messages from v2
-
-            const {component, namespace, type} = _getMtypeInfo(msgType);
-
-            if(component){
-                if([LEVELS.content, LEVELS.page, LEVELS.iframe_shim].includes(level)){
-                    // Handle specific reception cases in parent (CONTENT/PAGE)
-
-                    const cWindow = _lastSender;
-                    const iframe = Array.from(document.getElementsByTagName("iframe")).find(ifr => {
-                        return ifr.contentWindow === cWindow;
-                    });
-
-                    if (namespace === COMPONENT_STATE_NS) {
-                        // receiving a component status message from iframe/shimmed iframe componenet to content
-                        if (type === COMPONENT_STATE.ready) {
-                            _log(`Component ${component} is ready`);
-                            // when an iframe component says it's ready, send down the initEnv data and mark the component as
-                            // existing in that specific frame
-
-                            const dataAttr = _componentIdDataAttr(component);
-                            if(iframe) iframe.setAttribute(dataAttr, COMPONENT_STATE.ready);
-
-                            let new_msgType = _buildComponentStateMsgType(COMPONENT_STATE.initEnv, component);
-                            return _sendDown(new_msgType, LEVELS.iframe, _componentEnvData);
-                        }
-                        if (type === COMPONENT_STATE.initialized && iframe) {
-                            // when iframe is component is fully initialized, set the component ID on the iframe and alert
-                            // any fire an explicity call to component ready listeners
-                            // TODO
-                            // _lastSender is event.source -- it *SHOULD* be a window object
-                            // use that to verify that the window has a component ID marked as present in this iframe
-                            // via the data-relay-component-ids attribute!
-                            const compName = _componentNameFromId(component);
-                            _onComponentInitializedFns.forEach(item => {
-                                if(item.name_filter && compName.localeCompare(item.name_filter) !== 0) return;
-                                item.fn(compName, iframe, _lastSender);
-                            });
-                        }
-                    }
-                }
-            }
-
-            if(!(type in _listeners)) return;
-
-            const listeners = _listeners[type];
-            for(let i=listeners.length-1; i >=0; i--){
-                const listener = listeners[i];
-                const limitFrom = listener.limitFromLevels;
-                if(namespace && listener.ns !== namespace){
-                    continue;
-                }
-                if(!limitFrom || limitFrom.includes(sourceLevel)){
-
-                    if(component && [LEVELS.page, LEVELS.content, LEVELS.iframe_shim].includes(level)) {
-                        const listenerCompFilter = listener.componentFilter;
-
-                        if (listenerCompFilter !== COMPONENT_NAME_ALL_PREFIX) {
-                            const filterCheck = listenerCompFilter || "";
-                            if(!filterCheck.startsWith(COMPONENT_NAME_ALL_PREFIX) && component !== listenerCompFilter){
-                                // message targetted at a specific component ID, and this aint it
-                                return;
-                            }
-                            if(filterCheck.startsWith(COMPONENT_NAME_ALL_PREFIX)){
-                                // at this point we know it's a name-targetted component like '***COMPONENT_NAME'
-                                const compName = _componentNameFromId(component);
-                                if (compName !== listenerCompFilter.replace(COMPONENT_NAME_ALL_PREFIX, '')) {
-                                    // componenet name for this listener does NOT match the target
-                                    return;
-                                }
-                            }
-
-                        }
-                    }
-
-                    listener.fn.call( listener, msgData );
-                    if(listener.isOnce) listeners.splice(i, 1);
-                }
-            }
-        }
-
-        //check if a level is an actual context level (or level w/ tab.id)
-        function _isValidDestination(dest){
-            if(!dest) return false;
-            return (_parseDestination(dest).level in LEVELS);
-        }
-
-        //function to parse a destination address and return level (and optionally set tab.id)
-        function _parseDestination(dest){
-            let parts = dest.split("@");
-            let tabId = parts.length > 0 ? parseInt(parts[1],10) : null;
-            return {
-                level:  parts[0],
-                tab_id: tabId, // legacy support
-                tabId
-            };
-        }
-
-        // validate that data is actual encodable JSON and make a copy
-        function _validateData(data){
-            if(data === null || data === undefined) data = {};
-            if(typeof data !== 'object'){
-                throw new ChromeExtensionMessageRelayError("Data payload for message must be an object");
-            }
-            let newData;
-            try{
-                newData = JSON.parse(JSON.stringify(data));
-            }catch(e){
-                throw new ChromeExtensionMessageRelayError("Data payload for message included non-JSON-serizable data");
-            }
-            return newData;
-        }
-
-        //function to direct a message through channels via specific tab.id
-        function _levelViaTabId( level, tabId ){
-            return `${level}@${tabId}`;
-        }
-
-        // Function to direct a message through channels specific to an iframe w/ a containing component
-        function _levelViaComponentId( componentId ) {
-            return `${level}@${componentId}`;
-        }
-
-        //log function (that fires only if debug is enabled)
-        function _log( msg ){
-            if(!_debug) return;
-            console.log(`::MSG-RELAY (${level}):: ${msg}`);
-        }
-
-        //fn to mock an incoming message to the relay (as if incoming from a different level) - useful for testing
-        //funcitonality tied to bound listeners in applications that use the relay
-        function _localSendMsg( msgType, data, componentId=null){
-            data = _validateData(data);
-            if(componentId) {
-                const mtypeParts = _getMtypeInfo(msgType);
-                msgType = _buildMsgTypeFromParts(mtypeParts.type, mtypeParts.namespace, componentId);
-            }
-
-            const msg = _getMsg( msgType, level, level,true, data );
-            msg.msgFrom = 'mock';
-            _incomingMessage( msg, {tabId: 999} );
-        }
-
-
-        function _componentSend( msgType, data={}, componentName=null, forceLocal=false ){
-            const mtypeParts = _getMtypeInfo(msgType);
-            const componentFilter = COMPONENT_NAME_ALL_PREFIX + (componentName || '');
-            msgType = _buildMsgTypeFromParts(mtypeParts.type, mtypeParts.namespace, componentFilter);
-            if(level === LEVELS.iframe || forceLocal){
-                return _localSendMsg( msgType, data);
-            }
-            _sendDown(msgType, LEVELS.iframe, data);
-        }
-
-        function _componentOn (msgType, componentName, cb, isOnce=false){
-            if(![LEVELS.page, LEVELS.content, LEVELS.iframe_shim].includes(level)){
-                throw new ChromeExtensionMessageRelayError("Cannot bind component on listeners in this level");
-            }
-            const targetComponent = COMPONENT_NAME_ALL_PREFIX + componentName;
-            return _bind(msgType, cb, [LEVELS.iframe, LEVELS.iframe_shim], isOnce, targetComponent );
-        }
-
-        function _deleteInterval(){
-            const   DELETE = 1,
-                MARK_FOR_NEXT_ROUND_DELETE = 0;
-
-            for(let msgId in _receivedMessages){
-                if(_receivedMessages[msgId] === MARK_FOR_NEXT_ROUND_DELETE){
-                    _receivedMessages[msgId] = DELETE;
-                }else{
-                    delete _receivedMessages[msgId];
-                }
-            }
-        }
-
-        //setup _receivedMessages clear interval, where we clean 2 intervals ago IDs up and mark this batches
-        //for deletion in the next interval
-        function _setupReceivedMsgCleanInterval(){
-            _receivedMsgCleanTmo = setInterval(_deleteInterval, (_receivedMsgCleanIntervalSecs * 1000) );
-        }
-        _setupReceivedMsgCleanInterval();
-
-        function _clearTmo(){
-            clearInterval(_receivedMsgCleanTmo);
-        }
-
-        function _guid(){
-            if(typeof crypto !== 'undefined') return crypto.randomUUID();
-            return Math.random().toString(36).substring(2, 15) +
-                Math.random().toString(36).substring(2, 15);
-        }
-
-        // =============== START OF TEST-ONLY FUNCTIONALITY ====================
-
-
-        //fn to check current env and throw error if we are NOT in test env
-        function _isTest(){                                                                                             /*REM*/
-            if(level !== LEVELS.test){                                                                                  /*REM*/
-                throw new ChromeExtensionMessageRelayError("Cannot call test methods @ this level!");                   /*REM*/
-            }                                                                                                           /*REM*/
-            return true;                                                                                                /*REM*/
-        }                                                                                                               /*REM*/
-
-        //fn to pass in an internal token, check that we are in a test ENV, and return reference to token
-        function _test( token ){                                                                                        /*REM*/
-            _isTest();                                                                                                  /*REM*/
-            return token;                                                                                               /*REM*/
-        }                                                                                                               /*REM*/
-
-        const test_functions = {                                                                                        /*REM*/
-            getListeners:   () => { return _test(_listeners); }, //get internal listeners obj                           /*REM*/
-            setListeners:   (v) => { _isTest(); _listeners=v; }, //set internal listeners obj                           /*REM*/
-            setRecMsg:      (v) => { _receivedMessages = v; }, //set the _receivedMessages msg_obj                      /*REM*/
-            setResponseFn:  (fn) => { _isTest(); testResponse=fn; }, //set test fn that is called for responses         /*REM*/
-            token:          (token) => {                                                                                /*REM*/
-                _isTest();                                                                                              /*REM*/
-                return eval(token);                                                                                     /*REM*/ // jshint ignore:line
-            } //get exposed reference to an internal fn/var                                                             /*REM*/
-        };                                                                                                              /*REM*/
-
-
-        //create custom error class
-        function ChromeExtensionMessageRelayError(message) {
-            this.name = 'ChromeExtensionMessageRelayError';
-            this.message = message || 'Error in chrome extension message relay';
-            this.stack = (new Error()).stack;
-        }
-        ChromeExtensionMessageRelayError.prototype = Object.create(Error.prototype);
-        ChromeExtensionMessageRelayError.prototype.constructor = ChromeExtensionMessageRelayError;
-
-        if(level !== LEVELS.test){                                                                                      /*REM*/
-            let msg = "ERROR - you are using a version of the script intended only for dev and testing! ";              /*REM*/
-            msg += "Please use the version in /dist/message_relay.prod.js";                                             /*REM*/
-            throw new ChromeExtensionMessageRelayError(msg);                                                            /*REM*/
-        }                                                                                                               /*REM*/
-        if(level === LEVELS.content || level === LEVELS.service_worker){
-            // if specifying content level, verify this is running in an extension content or BG page to prevent spoofing
-            if(!chrome || !chrome.runtime || !chrome.runtime.id){
-                let msg = `ERROR - invalid context detected for ${level}, aborting.`;
-                throw new ChromeExtensionMessageRelayError(msg);
-            }
-        }
-
-        // =============== END OF TEST-ONLY FUNCTIONALITY ====================
-
-        // LEGACY handling -- when v2 message relay messages are passed in, they keys are now different
-        // NOTE -- this only allows v3 relays to RECIEVE v2 messages, *NOT* send messages to v2
-        const translateFromLegacyMessageFormat = (msg) => {
-            if('msg_namespace' in msg){
-                let translated = {};
-                for(let key in msg){
-                    if(key === 'msg_namespace'){
-                        translated.relayNamespace = msg.msg_namespace;
-                    }else{
-                        // convert from old camel case to snake case keys
-                        const newKey = key.replace(/_[a-z]/g, letter => `${letter.toUpperCase()}`.replace("_",''));
-                        translated[newKey] = msg[key];
-                    }
-                }
-                return translated;
-            }else{
-                return msg;
-            }
-        };
-
-        if( level !== LEVELS.test ){
-            //if NOT in test ENV, bind needed listeners for appropriate ENV to wire things up
-
-            if( [LEVELS.page, LEVELS.content, LEVELS.iframe, LEVELS.iframe_shim].includes(level)){
-                //this relay is in the page, content, or iframe level so setup listener for postmessage calls
-                globals.addEventListener('message', (event) => {
-                    if(typeof event.data !== 'object') return;
-                    const msg = translateFromLegacyMessageFormat(event.data);
-
-                    // IGNORE stuff that isn't part of relay traffic, for this namespace
-                    if('relayNamespace' in msg && (msg.relayNamespace === _relayNamespace)){
-                        _incomingMessage( msg, event.source );
-                    }
-                });
-            }
-            if(level === LEVELS.content){
-                /*
-                TODO - fix for service worker
-                _log('Alerting extension of ready');
-                _contentScriptConnectPort = chrome.runtime.connect({name: namespace});
-                _contentScriptConnectPort.onMessage.addListener((msg) => {
-                    _incomingMessage(msg);
-                });
-                */
-            }
-            if(level === LEVELS.service_worker){
-                /*
-                TODO - fix for service worker
-                // every time a content script connects, mark the channel as ready!
-                chrome.runtime.onConnect.addListener((event) => {
-                    if(event.name !== namespace || event.sender.id !== chrome.runtime.id) return;
-                    _markContentScriptReady(event);
-                });
-                */
-            }
-        }
-
-        const RETURNS = {
-            levels: LEVELS,                 // Get list of available levels
-            curLevel: () => {
-                return level;
-            },
-            on: _bind,                      // Bind listener for msg event
-            onOnce: (msgTypes, cb, limitFromLevels= null) => {  // Bind listener for a single callback
-                return _bind(msgTypes, cb, limitFromLevels, true);
-            },
-            off: (msgTypes) => {            // Unbind listener for msg event
-                _unbind(msgTypes);
-            },
-            offBound: (bound) => {
-                _offBound(bound);
-            },
-            componentOff: (msgTypes, componentId) => {
-                _unbind(msgTypes, componentId);
-            },
-            offAll: _unbindAll,             // Unbind all listeners at this level
-            send: _sendMsg,                 // Send message to specific level(s)
-            levelViaTabId: _levelViaTabId,  // Send message to specific level (on tabId channel only)
-            levelViaComponentId: _levelViaComponentId,
-            getLastMsgSenderInfo: () => {   // Get the sender info for last received message
-                return _lastSender;
-            },
-            getLastMsgType: () => {         // Get the msg type for last received message
-                return _lastMsg.type;
-            },
-            getLastMsg: () => {
-                return _lastMsg;
-            },
-            mockSend: _localSendMsg,        // Mock an incoming message to this level, useful for testing apps that use script
-            localSend: _localSendMsg,       // Fire event to a local listener (on this level)
-            componentSend: _componentSend,  // Fire an event to all components, or optionally named components
-            componentLocalSend: (msgType, data={}, componentName=null) => {
-                _componentSend(msgType, data, componentName, true);
-            },
-            componentOn: _componentOn,
-            componentRespond: _componentRespond,
-            clearTMO: _clearTmo,
-            registerComponentInitializedCb: (fn, nameFilter=null) => {
-                _onComponentInitializedFns.push({fn, name_filter: nameFilter});
-            },
-            setComponentEnvData: (envData) => {
-                _componentEnvData = envData;
-            },
-            setOverrideLocalComponentInit: (envData) => {
-                _componentEnvData = envData;
-                _componentLocalOverride = true;
-            },
-            getComponentEnvData: () => {
-                return _componentEnvData;
-            }
-            , test: test_functions      // Functionality exposed only for testing purposes                              /*REM*/
-        };
-
-        class Component{
-            constructor(relay, componentName, debug=false) {
-                this.enabled = true;
-                this._relay = relay;
-                this._componentName = componentName;
-                this._componentId = `${componentName}{${_guid()}}`; // format 'component{GUID}'
-                this._debug = debug;
-                this._ready = false;
-                this._initialized = false;
-                this._pendingInitCalls = [];
-                this._limitLevels = [this._relay.levels.page, this._relay.levels.content, this._relay.levels.iframe_shim];
-            }
-
-            get _initMsg(){
-                return `${COMPONENT_STATE.initEnv}.${COMPONENT_STATE_NS}`;
-            }
-
-            markReady(initEnvCallback=null){
-
-                const _ = (cb) => {
-                    if (this._ready) return;
-                    this._log("markReady");
-                    if (!this.enabled) return;
-
-                    const initReturn = (envData) => {
-                        cb(envData);
-                        while (this._pendingInitCalls.length) {
-                            let call = this._pendingInitCalls.shift();
-                            call.cb(call.data);
-                        }
-                        this.off(this._initMsg); // TODO - might we wanna call this more than once???
-                    };
-                    if(_componentLocalOverride){
-                        initReturn(_componentEnvData);
-                    }else {
-                        this.on(this._initMsg, initReturn);
-                        this.send(`${COMPONENT_STATE.ready}.${COMPONENT_STATE_NS}`);
-                    }
-                    this._ready = true;
-                };
-
-                if(!initEnvCallback){
-                    return new Promise((resolve) => {
-                        _(resolve);
-                    });
-                }
-                return _(initEnvCallback);
-            }
-
-            markInitialized(){
-                if(this._initialized) return;
-                this._log("MarkInitialized");
-                if(!this.enabled) return;
-                this._initialized = true;
-                this.send(`${COMPONENT_STATE.initialized}.${COMPONENT_STATE_NS}`);
-            }
-
-            _log(...args) {
-                if(!this._debug) return;
-                if(args){}
-                const items = Array.from(arguments);
-                items.unshift(`[${!this.enabled? 'DISABLED ' : ''}COMPONENT ${this._componentId}`);
-                console.warn(...items);
-            }
-
-            onOnce(msgType, cb){
-                this.on(msgType, cb, true);
-            }
-
-            on(msgType, cb, onOnce=false){
-                this._log(`>>> .on${onOnce ? 'Once' : ''}`, msgType);
-                if(!this.enabled) return;
-                this._relay.on(msgType, (data) => {
-                    this._log('>>> .on called', msgType, data);
-                    if(!this._ready && msgType !== this._initMsg){
-                        // queue calls until component is ready
-                        return this._pendingInitCalls.push({cb, data});
-                    }
-                    cb(data);
-                }, this._limitLevels, onOnce, this._componentId);
-            }
-
-            send(msgType, data= {}){
-                this._log(`>>> .send`, msgType, data);
-                if(!this.enabled) return;
-                this._relay.send(msgType, this._limitLevels, data, this._componentId);
-            }
-
-            off(msgTypes){
-                this._log(`>>> .off`, msgTypes);
-                this._relay.componentOff(msgTypes, this._componentId);
-            }
-
-            // TODO -- implement all the offAll, etc
-        }
-
-        RETURNS.newComponent = (component_name, debug=false) => {
-            if(level !== LEVELS.iframe && !_componentLocalOverride){
-                throw new ChromeExtensionMessageRelayError("You can only create a component in an iframe level.");
-            }
-            let component = new Component(RETURNS, component_name, debug);
-            _components[component.id] = component;
-            return component;
-        };
-
-        return RETURNS;
     };
 
-    if (('undefined' !== typeof module) && module.exports) {    /*REM_MODULE*/
-        //publish for node                                      /*REM_MODULE*/
-        module.exports = relay;                                 /*REM_MODULE*/
-    }else{                                                      /*REM_MODULE*/
-        //publish for browser/extension                         /*REM_MODULE*/
-        if(!('chromeExtensionMessageRelay' in globals)) {        /*REM_MODULE*/
-            globals.chromeExtensionMessageRelay = globals.chrome_extension_message_relay = relay;   /*REM_MODULE*/
-        }                                                       /*REM_MODULE*/
-    }                                                           /*REM_MODULE*/
-    return relay;
-})(typeof this !== 'undefined' ? this : (typeof window === 'undefined' ? {} : window));
+    //this function allows you to UNbind any msg type as a listener (with a sepcified namespace or ALL events of this type(s) if no namespace is supplied)
+    var _unbind = function(msg_types){
+        if(typeof(_mtype)=='string') msg_types = [msg_types];
+        for(var i=0; i<msg_types.length; i++){
+            var parts = msg_types[i].split('.'),
+                _mtype = parts[0],
+                _namespace = parts[1];
+            if(_mtype in listeners){
+                if(!_namespace){
+                    //unbind ALL listeners on this message type
+                    delete listeners[_mtype];
+                }else{
+                    //find only messages bound on this namespace/type
+                    for(var j=msg_types[i].length; j>=0; j--){
+                        if(msg_types[i][j].ns == _namespace) msg_types[i].splice(j,1);
+                    }
+                }
+            }
+            listeners[_mtype].push({ 'fn': cb, 'ns': _namespace});
+        }
+    };
+
+    //this function unbinds ALL listeners
+    var _unbind_all = function(){
+        listeners = {};
+    };
+
+    //get the base msg object used for relaying
+    var _get_msg = function( type, dest, up, data ){
+        //type = string, message type (specified when calling send_up or send_down)
+        //dest = detination level (one of _levels) - NOTE: can specific a specific tab.id to use only by specifying a @tab.id
+        //up = boolean, is this message going upwards (else going down)
+        //data = javascript variable to pass with message
+        if(!data) data = {};
+        var msg_id = ('msg_id' in data) ? data['msg_id'] : dest+":"+type+":"+(new Date().getTime());
+        data['msg_id'] = msg_id;
+        var msg_obj = {
+            msg_type:           type,
+            msg_from:           level,
+            msg_destination:    dest,
+            msg_up:             up,
+            msg_name:           msg_namespace,
+            msg_data:           data,
+            msg_id:             msg_id,
+            msg_tab_id:         null
+        }
+        var dest_data = _parse_destination(dest),
+            _level = dest_data[0],
+            _tab_id = dest_data[1];
+        if( _tab_id ){
+            var parts = dest.split("@");
+            msg_obj.msg_destination = _level;
+            msg_obj.msg_tab_id = _tab_id;
+        }
+        return msg_obj;
+    };
+
+    //send a message to the specified level(s) - NOTE destinations can be a string or array of destination strings
+    function _send_msg( msg_type, destinations, data , cb ){
+        if(typeof(destinations)=='string') destinations = [destinations];
+        for(var i=0; i<destinations.length; i++) {
+            if( !_is_valid_destination(destinations[i]) ){
+                _log("NOTICE - invalid level specified as destination ("+destinations[i]+")");
+                continue;
+            }
+            var dest_data = _parse_destination(destinations[i]),
+                _dest_level = dest_data[0];
+            if (_level_order[_dest_level] < _level_order[level]) {
+                _send_down(msg_type, destinations[i], data, cb);
+            } else {
+                _send_up(msg_type, destinations[i], data, cb);
+            }
+        }
+    }
+
+    //send a message DOWN the listening stack (exposed as <instance>.send_down)
+    function _send_down( msg_type, destination, data, cb ){
+        var msg = _get_msg( msg_type, destination, false, data );
+        _log( "Send msg DOWN from "+level+" to "+destination+" : "+msg_type+" - "+JSON.stringify(data));
+        _relay( msg, cb );
+    }
+
+    //send a message UP the listening stack (exposed as <instance>.send_up)
+    function _send_up( msg_type, destination, data, cb ){
+        var msg = _get_msg( msg_type, destination, true, data );
+        _log( "Send msg UP from "+level+" to "+destination+" : "+msg_type+" - "+ JSON.stringify(data));
+        _relay( msg, cb );
+    }
+
+    //This function is used by both send_up and send_down to relay a message the proper direction
+    function _relay( data, cb ){
+        if( (level==_levels.extension) && _levels[data['msg_destination']] < _levels.extension ){
+            //broadcasting DOWN from extension to content script - percolate it to each tab using chrome.tabs.sendMessage
+            //UNLESS a specific tab id is included on the request destination
+            chrome.tabs.query({}, function(tabs){
+                for (var i = 0; i < tabs.length; i++) {
+                    if(data.msg_tab_id && tabs[i].id != data.msg_tab_id) continue;
+                    chrome.tabs.sendMessage(tabs[i].id, data, function(response){
+                        if(cb) cb(response);
+                    });
+                }
+            });
+        }else if( (level==_levels.content && data['msg_destination']==_levels.extension) || level==_levels.extension ){
+            //going form content script to extension.. use chrome runtime sendmessage
+            chrome.runtime.sendMessage( data, function(response) {
+                if(cb && typeof(cb)=='function') cb(response);
+            });
+        }else{
+            //no interaction with extension background, broadcast w/ postmessage
+            if( level == _levels.iframe || level == _levels.iframe_shim ) {
+                window.parent.postMessage(data, "*");
+            }else if( (level==_levels.page || level==_levels.content) && data['msg_destination']==_levels.iframe){
+                //TODO: add support for targetting a specific iframe domain or DOM elem?
+                var iframes = document.getElementsByTagName('iframe');
+                for(var i=0; i<iframes.length; i++){
+                    try{
+                        iframes[i].contentWindow.postMessage(data, "*");
+                    }catch(e){}
+                }
+            }else{
+                window.postMessage(data, "*");
+            }
+        }
+    }
+
+
+    //This function is called for every incoming message to this level and determines if the messsage is intended for this level
+    //(and calls needed listeners) or continues relaying it upwards/downwards
+    function _incoming_message( msg, responder, sender ){
+        var msg_data =          msg.msg_data,
+            msg_from =          msg.msg_from,
+            msg_up =            msg.msg_up,
+            msg_destination =   msg.msg_destination,
+            msg_type =          msg.msg_type,
+            msg_id =            msg.msg_id,
+            msg_tab_id =        msg.msg_tab_id;
+
+        if(sender) last_sender_info = sender;
+        last_msg_type = msg_type;
+        var _msg_reception_id = msg_id+':'+msg_destination;
+
+        if(msg_from==level || received_messages.indexOf(_msg_reception_id) != -1){
+            //message already received - need this because page scripts and content scripts listen at same postMessage level and we don't want to relay it twice if it's a pass-through
+            return;
+        }
+
+        if( msg_destination == level ){
+            //message intended for this level, call any bound listeners
+            _log( "Msg ("+msg_type+") received from "+msg_from+" to "+msg_destination+' - '+ JSON.stringify(msg_data) );
+            received_messages.push(_msg_reception_id);
+            _call_bound_listeners( msg_type, msg_data, sender, responder );
+        }else{
+            //message still bubbling up/down.. just relay if needed
+            msg.msg_from = level;
+            if(msg_up && _level_order[level] > _level_order[msg_from]){
+                _relay( msg );
+                _log( "Msg ("+msg_type+") relaying UP from "+msg_from+" to "+msg_destination+' - '+ JSON.stringify(msg_data) );
+            }else if(!msg_up && _level_order[level] < _level_order[msg_from]){
+                _relay( msg );
+                _log( "Msg ("+msg_type+") relaying DOWN "+msg_from+" to "+msg_destination+' - '+ JSON.stringify(msg_data) );
+            }
+        }
+    }
+
+    //call all bound listeners for this message type at this level
+    function _call_bound_listeners( msg_type, msg_data, responder ){
+        if(!(msg_type in listeners)) return;
+        for(var i=0; i < listeners[msg_type].length; i++ ){
+            if(typeof(responder)=='function'){
+                //includes responder function (extension only)
+                listeners[msg_type][i].fn( msg_data, responder );
+            }else{
+                listeners[msg_type][i].fn( msg_data );
+            }
+        }
+    }
+
+    //check if a level is an actual context level (or level w/ tab.id)
+    function _is_valid_destination(dest){
+        if(!dest) return false;
+        var dest_data = _parse_destination(dest),
+            _level = dest_data[0],
+            _tab_id = dest_data[1];
+        return (_level in _levels);
+    }
+
+    //function to parse a destination address and return level (and optionally set tab.id)
+    function _parse_destination(dest){
+        return dest.split("@");
+    }
+
+    //function to direct a message through channels via specific tab.id
+    function _level_via_tab_id( _level, _tab_id ){
+        return _level+"@"+_tab_id;
+    }
+
+    //log function (that fires only if debug is enabled)
+    function _log( msg ){
+        if(!_debug) return;
+        console.log("::MSG-RELAY ("+level+"):: "+msg);
+    }
+
+    if( [_levels.page,_levels.content,_levels.iframe,_levels.iframe_shim].indexOf(level) != -1  ){
+        //this relay is in the page, content, or iframe level so setup listener for postmessage calls
+        window.addEventListener('message', function(event){
+            var evt_data = event.data;
+            if(typeof(evt_data)=='object' && 'msg_name' in evt_data && (evt_data.msg_name == msg_namespace)){
+                _incoming_message( evt_data );
+            }
+        });
+    }
+    if( [_levels.content,_levels.extension].indexOf(level) != -1 ){
+        //this relay is in the content or extension level, so setup listensers for chrome ext message passing
+        try{
+            chrome.runtime.onMessage.addListener(
+                function(msg, sender, sendResponse) {
+                    _incoming_message( msg, sendResponse, sender );
+                }
+            );
+        }catch(e){}
+    }
+
+    return {
+        levels: _levels,
+        on: _bind,
+        off: _unbind,
+        offAll: _unbind_all,
+        send: _send_msg,
+        levelViaTabId: _level_via_tab_id,
+        getLastMsgSenderInfo: function(){ return last_sender_info; },
+        getLastMsgType: function(){ return last_msg_type; }
+    };
+}

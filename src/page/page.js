@@ -33,5 +33,6 @@ window.GMAIL_FAVICON_CUSTOMIZER = (function(){
 function wait_for_gfc_resources(){
     if( typeof(chrome_extension_message_relay) === 'undefined' ) return setTimeout(wait_for_gfc_resources,300);
     GMAIL_FAVICON_CUSTOMIZER.init();
+    console.log("*GMAIL_FAVICON_CUSTOMIZER has been initialized")
 }
 wait_for_gfc_resources();
