@@ -1,10 +1,10 @@
 {
   "name": "Gmail Favicon Customizer",
-  "version": "2.0.3",
+  "version": "2.0.5",
   "manifest_version": 3,
-  "author": "Evan Carothers",
+  "author": "Evan Carothers, Marc Seldin",
   "description": "Customize your gmail favicon",
-  "homepage_url": "https://github.com/ecaroth/gmail-favicon-customizer-chrome-extension",
+  "homepage_url": "https://github.com/mseldin/gmail-favicon-customizer-chrome-extension",
   "icons": {
     "16": "src/images/icon-16.png",
     "128": "src/images/icon-128.png"
@@ -16,7 +16,6 @@
       ],
       "js": [
         "src/shared/message-relay/message_relay.js",
-        "src/shared/favico/favico.js",
         "src/content/content.js"
       ]
     }

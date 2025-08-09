@@ -6,7 +6,6 @@ var GFC = (function(){
         _num_unread = null, //number of unread messages
         _active = false, //is this tab active
         _check_update_frequency = 1000, //how often (in ms) to set/verify favicon
-        _favicon = null,
         MSG_RELAY = null;
 
 
@@ -16,15 +15,7 @@ var GFC = (function(){
         _insert_page_resources();
     }
 
-    function _update_favicon_and_num_messages(){
-    	var match = document.title.match(/\((\d+)\)/),
-            num_unread = match ? parseInt(match[1],10) : 0,
-            display_num = num_unread > 99 ? '99+' : num_unread;
-        if(_num_unread !== num_unread){
-            var anim = num_unread > _num_unread ? 'pop' : 'none';
-            _favicon.badge(display_num, {animation: anim});
-            _num_unread = num_unread;
-        }
+    function _update_favicon(){
         var link = document.querySelector("link[rel~='icon']");
 		if (!link) {
 			link = document.createElement('link');
@@ -37,10 +28,8 @@ var GFC = (function(){
     }
 
     function _setup_favicon_and_watcher(){
-        _favicon = new Favico({}, _img_data_uri);
-
-        setInterval( _update_favicon_and_num_messages, _check_update_frequency );
-        _update_favicon_and_num_messages();
+        setInterval( _update_favicon, _check_update_frequency );
+        _update_favicon();
     }
 
     function _check_email_address( data ){
@@ -48,7 +37,7 @@ var GFC = (function(){
         chrome.storage.local.get('gmail_accounts',function(items){
             var accts = 'gmail_accounts' in items ? items.gmail_accounts :[];
             for( var i=0; i<accts.length; i++) {
-            	accts[i].favicon = accts[i].favicon.replace(/[\n\r\t]/gm, "");
+            	//accts[i].favicon = accts[i].favicon.replace(/[\n\r\t]/gm, "");
                 if(accts[i].email==data.email){
                     _active = true;
                     _img_data_uri = accts[i].favicon;
