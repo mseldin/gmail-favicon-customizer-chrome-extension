@@ -1,6 +1,6 @@
 {
   "name": "Gmail Favicon Customizer",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "manifest_version": 3,
   "author": "Evan Carothers, Marc Seldin",
   "description": "Customize your gmail favicon",
@@ -16,7 +16,8 @@
       ],
       "js": [
         "src/shared/message-relay/message_relay.js",
-        "src/content/content.js"
+        "src/content/content.js",
+        "src/page/page.js"
       ]
     }
   ],

@@ -6,4 +6,3 @@ A few changes:
 * It no longer attempts to indicate anything related to the unread message count
 
 git hub at https://github.com/mseldin/gmail-favicon-customizer-chrome-extension
-forked from 

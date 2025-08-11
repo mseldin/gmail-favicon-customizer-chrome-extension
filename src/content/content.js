@@ -1,21 +1,30 @@
 "use strict";
 
 var GFC = (function(){
-
+	
     var _img_data_uri = null, //base image
         _num_unread = null, //number of unread messages
         _active = false, //is this tab active
         _check_update_frequency = 1000, //how often (in ms) to set/verify favicon
-        MSG_RELAY = null;
+        MSG_RELAY = null,
+        _debug=false;
 
 
     function _init(){
+    	if (_debug) {
+    		console.log("** GFC in _init");
+    	}
         MSG_RELAY = chrome_extension_message_relay( "gmail.favicon", "content", true );
         MSG_RELAY.on('check_email_address', _check_email_address);
         _insert_page_resources();
+        
+    	if (_debug) {
+        	console.log("*page resources inserted");
+        }
     }
 
     function _update_favicon(){
+    	if (_debug) {console.log("*in _update_favicon");}
         var link = document.querySelector("link[rel~='icon']");
 		if (!link) {
 			link = document.createElement('link');
@@ -23,7 +32,7 @@ var GFC = (function(){
 			document.head.appendChild(link);
 		}
 		link.href = _img_data_uri;
-		//console.log("*updating favicon, uri is "+link.href)
+		if (_debug) {console.log("*updating favicon, uri is "+link.href);}
         
     }
 
@@ -33,7 +42,7 @@ var GFC = (function(){
     }
 
     function _check_email_address( data ){
-    	console.log("checking email address: "+data.email)
+    	if (_debug) {console.log("checking email address: "+data.email);}
         chrome.storage.local.get('gmail_accounts',function(items){
             var accts = 'gmail_accounts' in items ? items.gmail_accounts :[];
             for( var i=0; i<accts.length; i++) {
@@ -41,7 +50,7 @@ var GFC = (function(){
                 if(accts[i].email==data.email){
                     _active = true;
                     _img_data_uri = accts[i].favicon;
-                    console.log("	found uri: "+_img_data_uri)
+                    if (_debug) {console.log("	found uri: "+_img_data_uri);}
                     break;
                 }
             }
@@ -60,7 +69,7 @@ var GFC = (function(){
             document.head.appendChild(s);
         }
     }
-
+	
     return{
         init:_init
     };
@@ -68,11 +77,15 @@ var GFC = (function(){
 
 function wait_for_resources(){
     var needed = [
-        typeof(window.chrome_extension_message_relay),
-        typeof(window.Favico)
+        typeof(window.chrome_extension_message_relay)
     ];
-    if(needed.indexOf('undefined')!==-1) return setTimeout(wait_for_resources,300);
+    if(needed.indexOf('undefined')!==-1) {
+    	console.log("*can't find message relay. sleeping.");
+    	return setTimeout(wait_for_resources,300);
+    }
     GFC.init();
     console.log("*GFC Initted.")
 }
+
 wait_for_resources();
+
